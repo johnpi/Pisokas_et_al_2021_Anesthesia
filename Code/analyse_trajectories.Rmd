@@ -1,0 +1,440 @@
+---
+title: "R Notebook for trajectory processing and statistics calculation"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library("trajr")    # The trajr package needs to be installed
+library(R.matlab)   # For reading matlab files
+library(ggplot2)    # For graphics
+library(data.table) # For converting the data frames to data tables which are indexable
+library(purrr)
+library(stringr)
+
+SWITCH_PLOT_ON_FILE = FALSE # Set to TRUE to store plots in files. FALSE to display plots inline.
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+
+Functions for calculating the expected diffusion distance of a trajectory. 
+
+```{r}
+TrajExpDrift <- function(trj, compass.direction = NULL) {
+
+  # E(cos(angles)) = mean(cos(angles))
+  c <- mean(cos(TrajAngles(trj, compass.direction = compass.direction)))
+  
+}
+
+TrajExpDriftDist <- function(trj, compass.direction = NULL) {
+
+  # E(cos(angles)) = mean(cos(angles))
+  c <- mean(cos(TrajAngles(trj, compass.direction = compass.direction)))
+  
+  # Mean step length
+  p <- mean(TrajStepLengths(trj))
+  
+  # Number of trajectory segments
+  n <- length(trj)
+  
+  res <- n * p * c
+}
+
+
+# Function for calculating the expected squared diffusion distance of a trajectory
+# Based on 
+TrajExpSquaredDiffusion <- function(trj, compass.direction = NULL) {
+
+  # E(cos(angles)) = mean(cos(angles))
+  c <- mean(cos(TrajAngles(trj, compass.direction = compass.direction)))
+  
+  stepLengths <- TrajStepLengths(trj)
+  
+  # Mean step length
+  p <- mean(stepLengths)
+  
+  # We assume constant step length
+  #b <- 0
+  # Coefficient of variation of step length
+  b <- stats::sd(stepLengths) / p
+  
+  # Number of trajectory segments
+  n <- length(trj)
+  
+  ED2 <- p^2 * (n*((1+c)/(1-c)+b^2) - ((2*c*(1-c^n))/(1-c)^2))
+}
+
+# Function for calculating the expected diffusion distance of a trajectory
+# Based on 
+TrajExpDiffusion <- function(trj, compass.direction = NULL) {
+  
+  ED2 <- TrajExpSquaredDiffusion(trj, compass.direction)
+  
+  ED <- sqrt(pi/4 * ED2)
+}
+
+# Function for calculating the nearest distance a trajectory gets to the goal
+TrajNestNearest <- function(trj) {
+  # Nest location
+  dist  <- 11 # m
+  angle <- 100 # degrees
+  
+  th <- angle * pi / 180 # radians
+  x  <- dist * cos(th)
+  y  <- dist * sin(th)
+  
+  distances <- sqrt((x - trj$x)^2 + (y - trj$y)^2)
+  
+  min_distance <- min(distances)
+}
+
+```
+
+
+
+Necessary function for calculating stats on data frame.
+
+```{r}
+# This function calculates statistics
+# of interest for a single trajectory
+characteriseTrajectory <- function(trj) {
+  
+  # Measures of speed
+  derivs <- TrajDerivatives(trj)
+  mean_speed <- mean(derivs$speed)
+  sd_speed <- sd(derivs$speed)
+
+  # Measures of straightness
+  trj_resampled <- TrajRediscretize(trj, discretization_step)
+  sinuosity <- TrajSinuosity2(trj)
+  sinuosity_rediscretizized <- TrajSinuosity2(trj_resampled)
+  
+  # Create a smoothed trajectory, filter order 3, length 31
+  trj_smoothed <- TrajSmoothSG(trj, p = 3, n = 11)
+  trj_smoothed_resampled <- TrajRediscretize(trj_smoothed, discretization_step)
+  sinuosity_smoothed_rediscretizized <- TrajSinuosity2(trj_smoothed_resampled)
+
+  # Larger Eamax values (approaching infinity) represent straighter paths (Cheung, Zhang, Stricker, & Srinivasan, 2007)
+  Emax_a <- TrajEmax(trj_resampled)
+  Emax_b <- TrajEmax(trj_resampled, eMaxB = TRUE)
+  Emax_a_unrediscretised <- TrajEmax(trj)
+  Emax_b_unrediscretised <- TrajEmax(trj, eMaxB = TRUE)
+  Emax_b_100deg <- TrajEmax(trj_resampled, eMaxB = TRUE, compass.direction = 1.7453292519943295) # 100deg
+  ExpectSquaredDiffusionDistance <- TrajExpSquaredDiffusion(trj_resampled)
+  ExpectDiffusionDistance <- TrajExpDiffusion(trj_resampled)
+  TrajExpDrift <- TrajExpDrift(trj_resampled)
+  TrajExpDriftDist <- TrajExpDriftDist(trj_resampled)
+  
+  TrajNestNearest <- TrajNestNearest(trj)
+  
+  # Calculate straightness (D/L) of the rediscretized trajectory
+  straightness_DL_ratio <- TrajStraightness(trj_resampled) # [0,1] where 1 indicates a straight line. 
+  
+  # Calculate alternate straightness (r) of the rediscretized trajectory
+  straightness_r <- Mod(TrajMeanVectorOfTurningAngles(trj_resampled)) # This is approximation of r.
+
+  # Periodicity
+  corr <- TrajDirectionAutocorrelations(trj_resampled) # , 60
+  first_min <- TrajDAFindFirstMinimum(corr)
+
+  # Return a list with all of the statistics for this trajectory
+  list(mean_speed = mean_speed, 
+       sd_speed = sd_speed, 
+       sinuosity = sinuosity, 
+       sinuosity_redisc = sinuosity_rediscretizized, 
+       sinuosity_smooth_redisc = sinuosity_smoothed_rediscretizized, 
+       straightness_DL_ratio = straightness_DL_ratio, 
+       straightness_r = straightness_r, 
+       Emax_a = Emax_a, 
+       Emax_b = Emax_b, 
+       Emax_b_100deg = Emax_b_100deg, 
+       Emax_a_unrediscretised = Emax_a_unrediscretised, 
+       Emax_b_unrediscretised = Emax_b_unrediscretised, 
+       ESqDiffusionDistance = ExpectSquaredDiffusionDistance, 
+       EDiffusionDistance = ExpectDiffusionDistance, 
+       TrajExpDrift = TrajExpDrift, 
+       TrajExpDriftDist = TrajExpDriftDist, 
+       TrajNestNearest = TrajNestNearest, 
+       min_deltaS = first_min[1], 
+       min_C = first_min[2]
+  )
+}
+```
+
+
+Load this function that looks for relevant files in the directory.
+
+```{r}
+# It returns a dataframe with filenames and corresponding condition name. 
+# The returned files have filenames that match the expected pattern with 
+# parameters the experimental condition and the recording type strings.
+# To invoke: 
+# Set the directory to search for matching files
+#  path_to_cvs_files <- '../Ant_Cooling_Data/Converted_to_CSV/'
+# Set the experimental condition strings list
+#  cond_str_vec <- c("FVNoIce", "FVIce", "ZVNoIce", "ZVIce")
+# Set the recording type string
+#  record_type_str <- '_25fps'
+#  record_type_str <- '_gps'
+# Invoke:
+#  tracks <- get_files_dataframe(path_to_cvs_files, cond_str_vec, record_type_str)
+get_matching_files <- function(path_to_cvs_files, cond_str_vec, record_type_str) {
+
+  tracks_df <- data.frame(filename = character(0),
+                   condition = character(0))
+
+
+  for (cond_str in cond_str_vec) {
+    
+    file_pattern <- paste0('^', '.*', cond_str, '_.*', record_type_str, '.*', '\\.csv$')
+    
+    files_list <- list.files(path=path_to_cvs_files, pattern=file_pattern)
+    
+    # Create a condition name vector
+    condition <- rep(cond_str, NROW(files_list))
+    
+    tracks_tmp <- as.data.frame(cbind(files_list, condition), stringsAsFactors = FALSE)
+    
+    tracks_df <- rbind(tracks_df, tracks_tmp)
+  }
+  
+  colnames(tracks_df) <- c("filename", "condition")
+  
+  df_tracks <- tracks_df # Return the dataframe
+}
+
+
+```
+
+This converts and stores the CSV files with rediscretizized trajectories. 
+```{r}
+# Define a function which rediscretizes a single trajectory
+rediscretizeTrajectoryAndSave <- function(trj, discretization_step, filename, output_files_path) {
+
+  trj_rediscretizized <- TrajRediscretize(trj, discretization_step)
+  new_df <- cbind(trj_rediscretizized["x"], trj_rediscretizized["y"])
+  colnames(new_df) <- c("x", "y")
+  write.csv(new_df, paste(output_files_path, str_replace(filename, ".csv", paste("_rediscretizized_", str_replace(paste(discretization_step), "[.]", "_"), ".csv", sep="")), sep=""))
+}
+```
+
+Make a list of the data files with trajectories recorded with camera
+
+```{r}
+# Set the directory to search for matching files
+path_to_cvs_files <- '../Ant_Cooling_Data/Converted_to_CSV/'
+
+# Set the experimental condition strings look for
+cond_str_vec <- c("FVNoIce", "FVIce", "ZVNoIce", "ZVIce")
+# Set the recording type string to look for
+record_type_str <- '_25fps'
+
+# Get a dataframe with the matching files
+tracks_cam <- get_matching_files(path_to_cvs_files, cond_str_vec, record_type_str)
+
+# If your list is read from a CSV file which contains empty lines, 
+# remove them like this:
+tracks_cam <- na.omit(tracks_cam)
+# Order of columns in the CSV files is unknown so identify them by name
+csvStruct <- list(x = "x", y = "y", time = "Time")
+trjs <- TrajsBuild(tracks_cam$filename, rootDir=path_to_cvs_files, 
+                   smoothP = NULL, smoothN = NULL, 
+                   spatialUnits = "m", timeUnits = "s", 
+                   csvStruct = csvStruct)
+tracks <- tracks_cam
+```
+
+Rediscretize the trajectories
+```{r}
+
+# Discretization step length in m
+discretization_step <- .001
+
+output_files_path <- "../Ant_Cooling_Data/Converted_to_CSV_rediscretisised/"
+
+# Create the directory if it does not exist
+dir.create(file.path(output_files_path), showWarnings = FALSE)
+
+for (i in 1:length(trjs)) {
+      rediscretizeTrajectoryAndSave(trjs[[i]], discretization_step, tracks["filename"][[1]][[i]], output_files_path)
+}
+```
+
+Then run this to produce a file with the trajectory statistics for the 20cm radius from the release point in ../Results/Stats/
+
+```{r}
+
+# Discretization step length in m
+discretization_step <<- .020 # Store it in the parent environment
+
+# Calculate all stats for trajectories in the list
+# which was built in the previous example
+stats <- TrajsMergeStats(trjs, characteriseTrajectory)
+stats <- cbind(condition=tracks['condition'], stats) 
+stats <- cbind(stats, condition=tracks['filename']) 
+print(stats)
+base_filename <- "stats_fps.csv"
+write.csv(stats, paste("../Results/Stats/", str_replace(base_filename, ".csv", paste("_step", sprintf("%0.3f", discretization_step), "m.csv", sep="")), sep=""))
+```
+
+Calculate the stats for the trajectories recorded with DGPS
+
+```{r}
+# Set the directory to search for matching files
+path_to_cvs_files <- '../Ant_Cooling_Data/Converted_to_CSV/'
+
+# Set the experimental condition strings look for
+cond_str_vec <- c("FVNoIce", "FVIce", "ZVNoIce", "ZVIce")
+# Set the recording type string to look for
+record_type_str <- '_gps'
+
+# Get a dataframe with the matching files
+tracks_gps <- get_matching_files(path_to_cvs_files, cond_str_vec, record_type_str)
+
+# If your list is read from a CSV file which contains empty lines, 
+# remove them like this:
+tracks_gps <- na.omit(tracks_gps)
+# Order of columns in the CSV files is unknown so identify them by name
+csvStruct <- list(x = "x", y = "y", time = "Time")
+trjs <- TrajsBuild(tracks_gps$filename, rootDir=path_to_cvs_files, 
+                   smoothP = NULL, smoothN = NULL, 
+                   spatialUnits = "m", timeUnits = "s", 
+                   csvStruct = csvStruct)
+tracks <- tracks_gps
+```
+
+Then run this to produce a file with the trajectory statistics of the full paths in ../Results/Stats/
+
+```{r}
+
+# Discretization step length in m
+discretization_step <<- .100 # Store it in the parent environment
+
+# Calculate all stats for trajectories in the list
+# which was built in the previous example
+stats <- TrajsMergeStats(trjs, characteriseTrajectory)
+stats <- cbind(condition=tracks['condition'], stats) 
+stats <- cbind(stats, condition=tracks['filename']) 
+print(stats)
+base_filename <- "stats_gps.csv"
+write.csv(stats, paste("../Results/Stats/", str_replace(base_filename, ".csv", paste("_step", sprintf("%0.3f", discretization_step), "m.csv", sep="")), sep=""))
+```
+
+Calculate the simulated trajectories statistics for different Memory manipulations.
+This will produce one stats .csv file in ../Results/Stats/ named 
+stats_simulated_with_Pontin_Holonomic_platformReleases_step0.020m.csv
+which is used by analyse_trajectories_publication.ipynb for making the plots. 
+```{r}
+discretization_step <<- 0.02 # Store it in the parent environment
+
+whole_or_part <- '_platformReleases' # '_platformReleases' or '' for the whole trajectories
+
+subdir_str <- ''
+subdir_str <- 'Conditions/Memory/'
+
+# Construct a vector with all the memory manipulations
+cond_str_vec                  <- c('ZV',   'FV',    'FVIce=0.5')
+memory_manipulation_vec       <- c('ZV',   'FV',    'FVIce')
+memory_manipulation_type_vec  <- c('None', 'None',  'Equal')
+memory_manipulation_level_vec <- c( 0.0,    0.0,     0.5)
+
+memory_manipulation_1_level_vec <- c('0.0', '0.05', '0.1', '0.15', '0.2', '0.25', '0.3', '0.35', '0.4', '0.45', '0.5', '0.55', '0.6', '0.65', '0.7', '0.75', '0.8', '0.85', '0.9', '0.95', '1.0')
+memory_manipulation_2_level_vec <- c('0.00', '0.01', '0.02', '0.03', '0.04', '0.05', '0.06', '0.07', '0.08', '0.09', '0.1', '0.11', '0.12', '0.13', '0.14', '0.15', '0.16', '0.17', '0.18', '0.19', '0.2', '0.3', '0.4', '0.5', '0.6', '0.7', '0.8', '0.9', '1.0')
+
+for (s in c('FVIce-', 'FVIcex')) {
+  for (i in memory_manipulation_1_level_vec) {
+    cond_str_vec <- append(cond_str_vec, paste0(s, i))
+    memory_manipulation_vec <- append(memory_manipulation_vec, 'FVIce')
+    if (all(s == 'FVIce-')) {
+      memory_manipulation_type = 'Subtract'
+    } else if (all(s == 'FVIcex')) {
+      memory_manipulation_type = 'Multiply'
+    }
+    memory_manipulation_type_vec <- append(memory_manipulation_type_vec, memory_manipulation_type)
+    memory_manipulation_level_vec <- append(memory_manipulation_level_vec, i)
+  }
+}
+for (i in memory_manipulation_2_level_vec) {
+  cond_str_vec <- append(cond_str_vec, paste0('FVIcen', i))
+  memory_manipulation_vec <- append(memory_manipulation_vec, 'FVIce')
+  memory_manipulation_type_vec <- append(memory_manipulation_type_vec, 'Noise')
+  memory_manipulation_level_vec <- append(memory_manipulation_level_vec, i)
+}
+
+stats <- data.frame()
+
+# For each memory condition
+i <- 0
+for (cond_str in cond_str_vec) {
+  i <- i + 1
+  # Construct the path to the data files
+  path_to_cvs_files <- paste0('./Simulation/path-integration-forget/data/Converted_to_CSV/', subdir_str, cond_str, '/')
+  # Construct the output path
+  output_files_path <- '../Results/Stats/'
+  
+  model_filenames <- c('Partial_holonomic', 'Averaging', 'with_Pontin_noise', 'with_Pontin_Holonomic', 'Holonomic')
+  model_filename <- model_filenames[4]
+  
+  # Construct the filename globbing strings
+  if (whole_or_part == '_platformReleases') {
+    file_pattern <- paste0('^', model_filename, paste0('.*_', cond_str, '_.*_platformReleases\\.csv$'))
+  } else {
+    file_pattern <- paste0('^', model_filename, paste0('.*_', cond_str, '_.*[[:digit:]]+\\.csv$'))
+  }
+  
+  # List all matching files
+  simulated_files_list <- list.files(path=path_to_cvs_files, pattern=file_pattern)
+  
+  # Extract from the filenames vector the noise levels as vectors
+  condition1_noise_level_list <- as.numeric(sub(paste0("_.*_", cond_str, "_.*"), "", sub(paste0(".*", "noiseSyn"), "", simulated_files_list)))
+  condition2_noise_level_list <- as.numeric(sub(paste0("_.*_", cond_str, "_.*"), "", sub(paste0(".*", "noiseRot"), "", simulated_files_list)))
+  
+  # Create a condition name vector
+  condition      <- rep(memory_manipulation_vec[i], NROW(condition2_noise_level_list))
+  MemManipType   <- rep(memory_manipulation_type_vec[i], NROW(condition2_noise_level_list))
+  MemDegradation <- rep(memory_manipulation_level_vec[i], NROW(condition2_noise_level_list))
+
+  tracks_simulated <- as.data.frame(cbind(simulated_files_list, condition, condition1_noise_level_list, condition2_noise_level_list, MemManipType, MemDegradation), stringsAsFactors = FALSE)
+  colnames(tracks_simulated) <- c("filename", "condition", "noiseSyn", "noiseRot", "MemManipType", "MemDegradation")
+  
+  # If your list is read from a CSV file which contains empty lines, 
+  # remove them like this:
+  tracks_simulated <- na.omit(tracks_simulated)
+  
+  # Order of columns in the CSV files is unknown so identify them by name
+  csvStruct <- list(x = "x", y = "y", time = "Time")
+  trjs_simulated <- TrajsBuild(paste0('^', tracks_simulated$filename, '$'), 
+                     rootDir=path_to_cvs_files, 
+                     smoothP = NULL, smoothN = NULL, 
+                     spatialUnits = "m", timeUnits = "s", 
+                     csvStruct = csvStruct)
+  
+  # Calculate all stats for trajectories in the list
+  # which was built in the previous example
+  stats_tmp <- TrajsMergeStats(trjs_simulated, characteriseTrajectory)
+  stats_tmp <- cbind(condition=tracks_simulated['condition'], noiseSyn=tracks_simulated['noiseSyn'], noiseRot=tracks_simulated['noiseRot'], MemManipType=tracks_simulated['MemManipType'],  MemDegradation=tracks_simulated['MemDegradation'], stats_tmp)
+  stats_tmp <- cbind(stats_tmp, condition=tracks_simulated['filename'])
+  
+  if (dim(stats)[1] == 0) { # If the dataframe is empty
+    stats <- stats_tmp
+  }
+  else { # If there were already rows append the new ones
+    stats <- rbind(stats, stats_tmp)
+  }
+}
+
+print(stats)
+base_filename <- "stats_simulated.csv"
+write.csv(stats, paste0(output_files_path, str_replace(base_filename, ".csv", paste("_", str_replace(model_filename, "_noise", ""), whole_or_part, "_step", sprintf("%0.3f", discretization_step), "m.csv", sep=""))))
+
+```
+
